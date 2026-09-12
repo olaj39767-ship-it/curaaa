@@ -312,7 +312,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             <div className="flex items-center justify-between pt-3 mt-2 border-t border-[#EEEAE0] text-[10px] text-[#8A8175]">
               <span className="flex items-center gap-1">
-                <ShieldCheck className="w-3 h-3" /> PCN Licensed #LA/8892
+                <ShieldCheck className="w-3 h-3" /> PCN Licensed #LA/8893
               </span>
               <a href="tel:+2348002872332" className="flex items-center gap-1">
                 <PhoneCall className="w-3 h-3" /> 0800-CURADECK
