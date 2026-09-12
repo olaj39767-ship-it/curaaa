@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
+import Fuse from 'fuse.js';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
@@ -11,7 +12,9 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize Gemini Client with server-side environment variable
+// ---------------------------------------------------------------------------
+// Gemini client (only ever called when the local layer below doesn't match)
+// ---------------------------------------------------------------------------
 let geminiClient: GoogleGenAI | null = null;
 
 function getGeminiClient(): GoogleGenAI | null {
@@ -56,163 +59,259 @@ Response format: You MUST respond in valid JSON with these exact fields:
   "suggestedPrompts": ["Short question 1", "Short question 2", "Short question 3"]
 }`;
 
-// Helper: Contextual fallback if Gemini API is offline or key is unconfigured
-function generateFallbackResponse(userMessage: string, inventory?: any[]) {
-  const lower = userMessage.toLowerCase();
+// ---------------------------------------------------------------------------
+// Local deterministic layer — free, instant, always answers correctly against
+// real inventory. This is the FIRST thing every message hits.
+// ---------------------------------------------------------------------------
 
-  // 1. Check live inventory stock if user asks about a specific medication or stock inquiry
-  if (Array.isArray(inventory) && inventory.length > 0) {
-    const isAskingStockOrPrice = 
-      lower.includes('stock') || 
-      lower.includes('available') || 
-      lower.includes('have') || 
-      lower.includes('left') || 
-      lower.includes('price') || 
-      lower.includes('cost') ||
-      lower.includes('buy') || 
-      lower.includes('get') ||
-      lower.includes('count') ||
-      lower.includes('much') ||
-      lower.includes('quantity');
+interface InventoryItem {
+  name: string;
+  genericName?: string;
+  category?: string;
+  price: number | string;
+  unit?: string;
+  inStock: boolean;
+  stockCount?: number;
+  prescriptionRequired?: boolean;
+}
 
-    // Try matching by exact product name or first two keywords
-    const matchedMed = inventory.find(m => {
-      if (!m || !m.name) return false;
-      const medLower = m.name.toLowerCase();
-      const primaryWord = medLower.split(' ')[0];
-      return lower.includes(medLower) || (primaryWord.length >= 3 && lower.includes(primaryWord));
-    });
+interface LocalReply {
+  reply: string;
+  recommendedAction: 'BUY_MEDICINES' | 'BOOK_CONSULTATION' | 'UPLOAD_PRESCRIPTION' | 'CARE_NURSES' | null;
+  actionLabel: string | null;
+  actionDetail: string | null;
+  suggestedPrompts: string[];
+  matched: boolean; // false = nothing confident matched here; caller decides whether to ask Gemini
+}
 
-    if (matchedMed && (isAskingStockOrPrice || lower.includes(matchedMed.name.toLowerCase().split(' ')[0]))) {
-      const stock = matchedMed.stockCount !== undefined ? matchedMed.stockCount : (matchedMed.inStock ? 50 : 0);
-      const inStock = matchedMed.inStock && stock > 0;
+const SAFETY_NOTICE =
+  '*Notice: Curadeck Concierge provides platform navigation only and does not offer medical advice, clinical diagnoses, or medication advisories.*';
 
-      if (inStock) {
-        return {
-          reply: `Yes! **${matchedMed.name}** is currently in stock. We have **${stock} units available** at **₦${Number(matchedMed.price).toLocaleString()}** per ${matchedMed.unit || 'pack'}.\n\nFast dispatch is available within 2-4 hours across Lagos Island and Mainland in cold-chain packaging.\n\n*Notice: Curadeck Concierge provides platform navigation only and does not offer medical advice.*`,
-          recommendedAction: 'BUY_MEDICINES',
-          actionLabel: `View ${matchedMed.name} in Market Floor`,
-          actionDetail: `₦${Number(matchedMed.price).toLocaleString()} • ${stock} in stock`,
-          suggestedPrompts: [
-            `Add ${matchedMed.name} to cart`,
-            'Check other medicines in stock',
-            'How fast is Lagos delivery?'
-          ]
-        };
-      } else {
-        return {
-          reply: `**${matchedMed.name}** is currently out of stock (0 units remaining in our central pharmacy inventory). However, our PCN-licensed clinical pharmacists can procure it for you if you upload your doctor's prescription slip.\n\n*Notice: Curadeck Concierge provides platform navigation only.*`,
-          recommendedAction: 'UPLOAD_PRESCRIPTION',
-          actionLabel: 'Upload Prescription Slip to Procure',
-          actionDetail: 'Our duty pharmacists will source it within 30 mins',
-          suggestedPrompts: [
-            'Upload doctor prescription slip',
-            'Browse in-stock medications',
-            'Consult a doctor online'
-          ]
-        };
-      }
-    }
-  }
+// Words to strip out of a message so what's left is (hopefully) just a product
+// name. Deliberately generous — cheap to extend as you see real queries.
+const FILLER = new RegExp(
+  [
+    'is there', 'do you have', 'do you sell', 'do you stock', 'got any', 'have any',
+    'i need', 'i want', 'i am looking for', "i'm looking for", 'looking for',
+    'where can i find', 'where can i get', 'can i get', 'can i buy', 'get me',
+    'need to buy', 'want to buy', 'buy', 'find', 'need', 'want',
+    'check', 'stock', 'available', 'availability',
+    'how much', 'price of', 'cost of', 'price for', 'please',
+  ].join('|'),
+  'gi'
+);
 
-  if (lower.includes('dosage') || lower.includes('dose') || lower.includes('how many') || lower.includes('how much') || lower.includes('take')) {
+function extractQueryTerm(text: string): string {
+  return text.replace(FILLER, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildInventoryIndex(inventory: InventoryItem[]) {
+  return new Fuse(inventory, {
+    keys: ['name', 'genericName'],
+    threshold: 0.35, // lower = stricter match
+    ignoreLocation: true,
+  });
+}
+
+// IMPORTANT: create a fresh RegExp every call. Reusing one `g`-flagged
+// RegExp across .test() calls carries `lastIndex` state between calls and
+// causes intermittent false negatives (works sometimes, silently fails
+// other times, looks "random" from the outside).
+function hasProductIntent(text: string): boolean {
+  return new RegExp(FILLER.source, 'i').test(text);
+}
+
+// Words that mean "this is a symptom/clinical/logistics statement, not a
+// product search" — these must always be free to reach the compliance
+// branches in generateLocalReply below, even if the message also happens
+// to contain an intent phrase like "i need" or "is there".
+const SAFETY_KEYWORDS =
+  /\b(malaria|coartem|lonart|amatem|fever|dosage|dose|prescription|\brx\b|slip|nurse|elderly|stroke|post-op|doctor|consult|sick|pain|diagnos|advice|child|delivery|lagos|shipping|hormonal|imbalance|symptom|infection|illness|disease|condition)\b/i;
+
+function tryInventoryMatch(userMessage: string, inventory?: InventoryItem[]): LocalReply | null {
+  if (!Array.isArray(inventory) || inventory.length === 0) return null;
+
+  const intentSignal = hasProductIntent(userMessage);
+  const safetySignal = SAFETY_KEYWORDS.test(userMessage);
+
+  const term = extractQueryTerm(userMessage);
+  if (term.length < 2) return null;
+
+  const fuse = buildInventoryIndex(inventory);
+  const results = fuse.search(term, { limit: 1 });
+
+  if (results.length === 0) {
+    // Only shortcut to a flat "not found" when the message is UNAMBIGUOUSLY
+    // a product request: genuine intent phrasing present, AND no safety
+    // keyword at all. "i need to see a doctor" has intent ("i need") but
+    // also "doctor" — that must fall through to the doctor branch, not get
+    // a catalog-miss message. A real product match (below) always wins
+    // regardless of this, since that's a genuine, named item.
+    if (!intentSignal || safetySignal) return null;
+    const wordCount = term.split(' ').filter(Boolean).length;
+    if (wordCount > 4) return null;
+
     return {
-      reply: "Curadeck Concierge is an automated platform guide and does not provide medication dosage instructions or clinical medical advisory. Medication dosing must be determined by a qualified physician or licensed pharmacist based on patient age, weight, and clinical history.\n\nTo receive safe, personalized guidance, please book a session with our on-duty licensed doctor or connect with our duty pharmacist.\n\n*Notice: Curadeck does not offer medical advice, diagnoses, or medication advisories.*",
-      recommendedAction: 'BOOK_CONSULTATION',
-      actionLabel: 'Consult a Licensed Doctor',
-      actionDetail: 'Personalized evaluation & e-prescription from ₦2,500',
-      suggestedPrompts: [
-        'How do I book a doctor session?',
-        'Talk to a PCN duty pharmacist',
-        'Upload doctor prescription'
-      ]
-    };
-  }
-
-  if (lower.includes('malaria') || lower.includes('coartem') || lower.includes('lonart') || lower.includes('amatem') || lower.includes('fever')) {
-    return {
-      reply: "Curadeck stocks authentic, NAFDAC-registered malaria medications on our Market Floor for patients with a verified prescription or clinical recommendation. Because malaria symptoms overlap with several other acute illnesses, we do not provide medical diagnosis or drug advisories.\n\nWe strongly recommend consulting a licensed medical practitioner to confirm your diagnosis before starting antimalarial therapy.\n\n*Notice: Curadeck Concierge provides platform navigation only and does not offer medical advice.*",
-      recommendedAction: 'BOOK_CONSULTATION',
-      actionLabel: 'Book Doctor Consultation',
-      actionDetail: 'Live HD video • Starting from ₦2,500',
-      suggestedPrompts: [
-        'See available doctors now',
-        'Browse Market Floor catalog',
-        'How fast is Lagos delivery?'
-      ]
-    };
-  }
-
-  if (lower.includes('doctor') || lower.includes('consult') || lower.includes('sick') || lower.includes('pain') || lower.includes('diagnos') || lower.includes('advice') || lower.includes('child')) {
-    return {
-      reply: "I understand you are seeking medical care. Curadeck does not provide automated clinical diagnosis or medical advisory. For your safety and peace of mind, our platform connects you with licensed Nigerian General Practitioners and Pediatricians for live HD video teleconsultations starting at ₦2,500.\n\nA licensed physician can review your symptoms, provide an official diagnosis, and issue an e-prescription.\n\n*Notice: In a medical emergency, please visit the nearest hospital immediately.*",
-      recommendedAction: 'BOOK_CONSULTATION',
-      actionLabel: 'Book Doctor Consultation',
-      actionDetail: 'Licensed Nigerian Doctors • Starting from ₦2,500',
-      suggestedPrompts: [
-        'See available doctors today',
-        'How does a teleconference work?',
-        'Upload existing prescription'
-      ]
-    };
-  }
-
-  if (lower.includes('rx') || lower.includes('prescription') || lower.includes('slip') || lower.includes('doctor paper') || lower.includes('whatsapp') || lower.includes('upload')) {
-    return {
-      reply: "You can securely upload your doctor's slip or photo of your prescription. In compliance with Nigerian PCN regulations, every prescription is manually reviewed by a licensed clinical pharmacist who verifies the dosage, checks for interactions, and provides an itemized quote via WhatsApp within 30 minutes.\n\n*Notice: Prescription medications require verification by a licensed PCN pharmacist.*",
+      reply: `I couldn't find "${term}" in the catalog right now, but our PCN-licensed pharmacists can try to source it for you. Upload a prescription slip or note with the details and we'll confirm availability and pricing within 30 minutes.\n\n${SAFETY_NOTICE}`,
       recommendedAction: 'UPLOAD_PRESCRIPTION',
-      actionLabel: 'Upload Slip for Pharmacist Review',
-      actionDetail: 'Verified by PCN Pharmacists within 30 mins',
-      suggestedPrompts: [
-        'How does the ₦500 teleconference work?',
-        'Can I order over-the-counter medicine?',
-        'How fast is Lagos delivery?'
-      ]
+      actionLabel: `Request "${term}"`,
+      actionDetail: 'Pharmacists confirm sourcing within 30 mins',
+      suggestedPrompts: ['Upload prescription slip', 'Browse medicine catalog', 'Book a doctor consultation'],
+      matched: true,
     };
   }
 
-  if (lower.includes('nurse') || lower.includes('elderly') || lower.includes('home care') || lower.includes('stroke') || lower.includes('post-op')) {
-    return {
-      reply: "Curadeck provides verified, PCN/NMCN-accredited Registered Nurses (RN) for in-home medical care across Lagos and major cities. Our nurses specialize in elderly companionship, post-operative care, stroke rehabilitation, and catheter management. Daily care shifts start at ₦12,000.\n\n*Notice: Curadeck nurses provide in-person clinical care under physician oversight.*",
-      recommendedAction: 'CARE_NURSES',
-      actionLabel: 'Request a Home Care Nurse',
-      actionDetail: 'Vetted Registered Nurses • Daily shifts from ₦12,000',
-      suggestedPrompts: [
-        'What procedures do home nurses handle?',
-        'Can I book a nurse for overnight care?',
-        'Check nurse availability in Lagos'
-      ]
-    };
-  }
+  const med = results[0].item;
+  const stock = med.stockCount !== undefined ? med.stockCount : med.inStock ? 50 : 0;
+  const inStock = med.inStock && stock > 0;
+  const priceStr = `₦${Number(med.price).toLocaleString()}`;
 
-  if (lower.includes('delivery') || lower.includes('lagos') || lower.includes('speed') || lower.includes('shipping')) {
+  if (inStock) {
     return {
-      reply: "Curadeck offers express same-day delivery (2 to 4 hours) across Lagos Island and Mainland for in-stock medications. All items are dispatched in temperature-controlled cold-chain packaging. Tracked nationwide delivery across all 36 Nigerian states arrives in 24 to 48 hours.\n\n*Notice: Prescription-required drugs require clinical verification before dispatch.*",
+      reply: `Yes! **${med.name}** is currently in stock. We have **${stock} units available** at **${priceStr}** per ${med.unit || 'pack'}.\n\nFast dispatch is available within 2-4 hours across Lagos Island and Mainland in cold-chain packaging.\n\n${SAFETY_NOTICE}`,
       recommendedAction: 'BUY_MEDICINES',
-      actionLabel: 'Shop Market Floor with Fast Delivery',
-      actionDetail: '2-4h dispatch across Lagos • 24-48h nationwide',
-      suggestedPrompts: [
-        'Browse medicine catalog',
-        'Book a doctor consultation',
-        'Upload prescription slip'
-      ]
+      actionLabel: `View ${med.name} in Market Floor`,
+      actionDetail: `${priceStr} • ${stock} in stock`,
+      suggestedPrompts: [`Add ${med.name} to cart`, 'Check other medicines in stock', 'How fast is Lagos delivery?'],
+      matched: true,
     };
   }
 
   return {
-    reply: "Welcome to Curadeck! I'm your healthcare platform concierge. We help you access authentic NAFDAC-approved medications, schedule virtual video consultations with licensed Nigerian doctors, or upload your doctor's slip for pharmacist review on WhatsApp.\n\n*Notice: Curadeck Concierge provides platform navigation only and does not give medical advice, clinical diagnoses, or medication advisories.*",
-    recommendedAction: 'BUY_MEDICINES',
-    actionLabel: 'Browse Medicine Catalog',
-    actionDetail: '2,500+ verified drugs • PCN Accredited',
-    suggestedPrompts: [
-      'How do I buy medicines?',
-      'Book a doctor consultation',
-      'Upload doctor prescription'
-    ]
+    reply: `**${med.name}** is currently out of stock (0 units remaining in our central pharmacy inventory). However, our PCN-licensed clinical pharmacists can procure it for you if you upload your doctor's prescription slip.\n\n${SAFETY_NOTICE}`,
+    recommendedAction: 'UPLOAD_PRESCRIPTION',
+    actionLabel: 'Upload Prescription Slip to Procure',
+    actionDetail: "Our duty pharmacists will source it within 30 mins",
+    suggestedPrompts: ['Upload doctor prescription slip', 'Browse in-stock medications', 'Consult a doctor online'],
+    matched: true,
   };
 }
 
-// API Routes
+function generateLocalReply(userMessage: string, inventory?: InventoryItem[]): LocalReply {
+  const lower = userMessage.toLowerCase();
+
+  // 1. Only genuine product-seeking phrasing attempts a catalog match, and
+  //    even then backs off for symptom/clinical statements (see the guard
+  //    inside tryInventoryMatch above).
+  const inventoryMatch = tryInventoryMatch(userMessage, inventory);
+  if (inventoryMatch) return inventoryMatch;
+
+  // 2. Dosage / "what should I take" — must never get a real dosage answer.
+  if (lower.includes('dosage') || lower.includes('dose') || lower.includes('how many') || lower.includes('how much') || lower.includes('take')) {
+    return {
+      reply:
+        "Curadeck Concierge is an automated platform guide and does not provide medication dosage instructions or clinical medical advisory. Medication dosing must be determined by a qualified physician or licensed pharmacist based on patient age, weight, and clinical history.\n\nTo receive safe, personalized guidance, please book a session with our on-duty licensed doctor or connect with our duty pharmacist.\n\n" +
+        SAFETY_NOTICE,
+      recommendedAction: 'BOOK_CONSULTATION',
+      actionLabel: 'Consult a Licensed Doctor',
+      actionDetail: 'Personalized evaluation & e-prescription from ₦2,500',
+      suggestedPrompts: ['How do I book a doctor session?', 'Talk to a PCN duty pharmacist', 'Upload doctor prescription'],
+      matched: true,
+    };
+  }
+
+  // 3. Malaria / fever — steer to diagnosis, don't self-serve antimalarials.
+  if (lower.includes('malaria') || lower.includes('coartem') || lower.includes('lonart') || lower.includes('amatem') || lower.includes('fever')) {
+    return {
+      reply:
+        "Curadeck stocks authentic, NAFDAC-registered malaria medications on our Market Floor for patients with a verified prescription or clinical recommendation. Because malaria symptoms overlap with several other acute illnesses, we do not provide medical diagnosis or drug advisories.\n\nWe strongly recommend consulting a licensed medical practitioner to confirm your diagnosis before starting antimalarial therapy.\n\n" +
+        SAFETY_NOTICE,
+      recommendedAction: 'BOOK_CONSULTATION',
+      actionLabel: 'Book Doctor Consultation',
+      actionDetail: 'Live HD video • Starting from ₦2,500',
+      suggestedPrompts: ['See available doctors now', 'Browse Market Floor catalog', 'How fast is Lagos delivery?'],
+      matched: true,
+    };
+  }
+
+  // 4. General symptoms / "see a doctor" intent — includes hormonal/other
+  //    condition language so bare health complaints route to a doctor.
+  if (
+    lower.includes('doctor') || lower.includes('consult') || lower.includes('sick') ||
+    lower.includes('pain') || lower.includes('diagnos') || lower.includes('advice') ||
+    lower.includes('child') || lower.includes('hormonal') || lower.includes('imbalance') ||
+    lower.includes('symptom') || lower.includes('infection') || lower.includes('illness') ||
+    lower.includes('disease') || lower.includes('condition')
+  ) {
+    return {
+      reply:
+        "I understand you are seeking medical care. Curadeck does not provide automated clinical diagnosis or medical advisory. For your safety and peace of mind, our platform connects you with licensed Nigerian General Practitioners and Pediatricians for live HD video teleconsultations starting at ₦2,500.\n\nA licensed physician can review your symptoms, provide an official diagnosis, and issue an e-prescription.\n\n*Notice: In a medical emergency, please visit the nearest hospital immediately.*",
+      recommendedAction: 'BOOK_CONSULTATION',
+      actionLabel: 'Book Doctor Consultation',
+      actionDetail: 'Licensed Nigerian Doctors • Starting from ₦2,500',
+      suggestedPrompts: ['See available doctors today', 'How does a teleconference work?', 'Upload existing prescription'],
+      matched: true,
+    };
+  }
+
+  // 5. Prescription upload.
+  if (lower.includes('rx') || lower.includes('prescription') || lower.includes('slip') || lower.includes('doctor paper') || lower.includes('whatsapp') || lower.includes('upload')) {
+    return {
+      reply:
+        "You can securely upload your doctor's slip or photo of your prescription. In compliance with Nigerian PCN regulations, every prescription is manually reviewed by a licensed clinical pharmacist who verifies the dosage, checks for interactions, and provides an itemized quote via WhatsApp within 30 minutes.\n\n*Notice: Prescription medications require verification by a licensed PCN pharmacist.*",
+      recommendedAction: 'UPLOAD_PRESCRIPTION',
+      actionLabel: 'Upload Slip for Pharmacist Review',
+      actionDetail: 'Verified by PCN Pharmacists within 30 mins',
+      suggestedPrompts: ['How does the ₦500 teleconference work?', 'Can I order over-the-counter medicine?', 'How fast is Lagos delivery?'],
+      matched: true,
+    };
+  }
+
+  // 6. Home care / nurses.
+  if (lower.includes('nurse') || lower.includes('elderly') || lower.includes('home care') || lower.includes('stroke') || lower.includes('post-op')) {
+    return {
+      reply:
+        "Curadeck provides verified, PCN/NMCN-accredited Registered Nurses (RN) for in-home medical care across Lagos and major cities. Our nurses specialize in elderly companionship, post-operative care, stroke rehabilitation, and catheter management. Daily care shifts start at ₦12,000.\n\n*Notice: Curadeck nurses provide in-person clinical care under physician oversight.*",
+      recommendedAction: 'CARE_NURSES',
+      actionLabel: 'Request a Home Care Nurse',
+      actionDetail: 'Vetted Registered Nurses • Daily shifts from ₦12,000',
+      suggestedPrompts: ['What procedures do home nurses handle?', 'Can I book a nurse for overnight care?', 'Check nurse availability in Lagos'],
+      matched: true,
+    };
+  }
+
+  // 7. Delivery / logistics.
+  if (lower.includes('delivery') || lower.includes('lagos') || lower.includes('speed') || lower.includes('shipping')) {
+    return {
+      reply:
+        "Curadeck offers express same-day delivery (2 to 4 hours) across Lagos Island and Mainland for in-stock medications. All items are dispatched in temperature-controlled cold-chain packaging. Tracked nationwide delivery across all 36 Nigerian states arrives in 24 to 48 hours.\n\n*Notice: Prescription-required drugs require clinical verification before dispatch.*",
+      recommendedAction: 'BUY_MEDICINES',
+      actionLabel: 'Shop Market Floor with Fast Delivery',
+      actionDetail: '2-4h dispatch across Lagos • 24-48h nationwide',
+      suggestedPrompts: ['Browse medicine catalog', 'Book a doctor consultation', 'Upload prescription slip'],
+      matched: true,
+    };
+  }
+
+  // 8. Greeting.
+  if (/^\s*(hi|hello|hey|good (morning|afternoon|evening))\s*[!.]?\s*$/i.test(userMessage)) {
+    return {
+      reply: "Hey! I can check medicine stock, book a doctor, or take a prescription upload. What do you need?",
+      recommendedAction: null,
+      actionLabel: null,
+      actionDetail: null,
+      suggestedPrompts: ['Is Coartem in stock?', 'Book a doctor teleconsultation', 'Upload doctor prescription'],
+      matched: true,
+    };
+  }
+
+  // Nothing local matched — genuinely open-ended. Caller may try Gemini.
+  return {
+    reply:
+      "Welcome to Curadeck! I'm your healthcare platform concierge. We help you access authentic NAFDAC-approved medications, schedule virtual video consultations with licensed Nigerian doctors, or upload your doctor's slip for pharmacist review on WhatsApp.\n\n" +
+      SAFETY_NOTICE,
+    recommendedAction: 'BUY_MEDICINES',
+    actionLabel: 'Browse Medicine Catalog',
+    actionDetail: '2,500+ verified drugs • PCN Accredited',
+    suggestedPrompts: ['How do I buy medicines?', 'Book a doctor consultation', 'Upload doctor prescription'],
+    matched: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Routes
+// ---------------------------------------------------------------------------
+
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -230,54 +329,52 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
+    // --- 1. Local deterministic layer first: free, instant, zero quota use ---
+    const local = generateLocalReply(message, inventory);
+    console.log(
+      `[chat v4] "${message}" -> matched=${local.matched} intent=${hasProductIntent(message)} safety=${SAFETY_KEYWORDS.test(message)} reply="${local.reply.slice(0, 50)}..."`
+    );
+
+    if (local.matched) {
+      const { matched, ...payload } = local;
+      res.json({ ...payload, source: 'local' });
+      return;
+    }
+
+    // --- 2. Only genuinely unmatched queries reach Gemini ---
     const ai = getGeminiClient();
 
-    // If Gemini client is available, generate AI response
     if (ai) {
       try {
-        // Build conversation contents
         const contents: Array<{ role: 'user' | 'model'; parts: [{ text: string }] }> = [];
 
         if (Array.isArray(history) && history.length > 0) {
-          // Add up to last 6 messages for context
           const recentHistory = history.slice(-6);
           for (const item of recentHistory) {
             if (item && item.text && (item.role === 'user' || item.role === 'model')) {
-              contents.push({
-                role: item.role,
-                parts: [{ text: item.text }],
-              });
+              contents.push({ role: item.role, parts: [{ text: item.text }] });
             }
           }
         }
 
-        // Add current user prompt
-        contents.push({
-          role: 'user',
-          parts: [{ text: message.trim() }],
-        });
+        contents.push({ role: 'user', parts: [{ text: message.trim() }] });
 
-        // Dynamic system instruction incorporating live pharmacy inventory & stock levels
         let dynamicInstruction = CURADECK_SYSTEM_INSTRUCTION;
         if (Array.isArray(inventory) && inventory.length > 0) {
-          const inventorySummary = inventory.slice(0, 30).map((m: any) => {
-            const stock = m.stockCount !== undefined ? m.stockCount : (m.inStock ? 50 : 0);
-            const status = (m.inStock && stock > 0) ? `IN STOCK (${stock} units available)` : 'OUT OF STOCK (0 units)';
-            return `- ${m.name || 'Medication'} (${m.category || 'General'}): ${status} at ₦${Number(m.price || 0).toLocaleString()} per ${m.unit || 'unit'}${m.prescriptionRequired ? ' [Prescription Required]' : ' [OTC]'}`;
-          }).join('\n');
+          const inventorySummary = inventory
+            .slice(0, 30)
+            .map((m: any) => {
+              const stock = m.stockCount !== undefined ? m.stockCount : m.inStock ? 50 : 0;
+              const status = m.inStock && stock > 0 ? `IN STOCK (${stock} units available)` : 'OUT OF STOCK (0 units)';
+              return `- ${m.name || 'Medication'} (${m.category || 'General'}): ${status} at ₦${Number(m.price || 0).toLocaleString()} per ${m.unit || 'unit'}${m.prescriptionRequired ? ' [Prescription Required]' : ' [OTC]'}`;
+            })
+            .join('\n');
 
-          dynamicInstruction += `\n\nREAL-TIME LIVE PHARMACY INVENTORY & STOCK LEVELS:
-${inventorySummary}
-
-STOCK CHECKING RULES:
-- When a user asks whether a medication or item is available, in stock, or what its price/stock quantity is, reference the real-time stock levels above.
-- If the item is IN STOCK, confirm availability, unit price in Naira (₦), available units, and mention fast Lagos express delivery.
-- If the item is OUT OF STOCK, clearly state that it is temporarily out of stock in our central warehouse, but our PCN-licensed pharmacists can procure it if they upload a doctor's prescription slip.
-- Always include the mandatory non-advisory safety disclaimer.`;
+          dynamicInstruction += `\n\nREAL-TIME LIVE PHARMACY INVENTORY & STOCK LEVELS:\n${inventorySummary}\n\nSTOCK CHECKING RULES:\n- When a user asks whether a medication or item is available, in stock, or what its price/stock quantity is, reference the real-time stock levels above.\n- If the item is IN STOCK, confirm availability, unit price in Naira (₦), available units, and mention fast Lagos express delivery.\n- If the item is OUT OF STOCK, clearly state that it is temporarily out of stock in our central warehouse, but our PCN-licensed pharmacists can procure it if they upload a doctor's prescription slip.\n- Always include the mandatory non-advisory safety disclaimer.`;
         }
 
         const response = await ai.models.generateContent({
-          model: 'gemini-3.6-flash',
+          model: 'gemini-2.5-flash',
           contents,
           config: {
             systemInstruction: dynamicInstruction,
@@ -300,8 +397,7 @@ STOCK CHECKING RULES:
               source: 'gemini',
             });
             return;
-          } catch (jsonErr) {
-            // If model output wasn't strictly JSON, return text directly
+          } catch {
             res.json({
               reply: rawText,
               recommendedAction: null,
@@ -315,16 +411,14 @@ STOCK CHECKING RULES:
         }
       } catch (geminiError: any) {
         console.warn('Gemini API call returned an error, falling back gracefully:', geminiError?.message || geminiError);
-        // Fall through to fallback handler
+        // fall through to the local "didn't match" response below
       }
     }
 
-    // Fallback response if Gemini API is unconfigured or failed
-    const fallback = generateFallbackResponse(message, inventory);
-    res.json({
-      ...fallback,
-      source: 'fallback',
-    });
+    // --- 3. Gemini unavailable, errored, or not configured: use the local
+    //         unmatched response so the chat still says something sensible ---
+    const { matched, ...payload } = local;
+    res.json({ ...payload, source: 'fallback' });
   } catch (error: any) {
     console.error('Error in /api/chat:', error);
     res.status(500).json({
@@ -339,7 +433,6 @@ STOCK CHECKING RULES:
 });
 
 async function startServer() {
-  // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -355,7 +448,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Curadeck Health server running on port ${PORT}`);
+    console.log(`Curadeck Health server running on port ${PORT} [server.ts v4 — request-to-source flow]`);
   });
 }
 

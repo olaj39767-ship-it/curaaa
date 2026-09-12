@@ -14,7 +14,7 @@ interface ChatBubbleProps {
   timestamp?: string;
   action?: ChatAction | null;
   onActionClick?: (actionType: 'BUY_MEDICINES' | 'BOOK_CONSULTATION' | 'UPLOAD_PRESCRIPTION' | 'CARE_NURSES') => void;
-  source?: 'gemini' | 'gemini-raw' | 'fallback' | 'system';
+source?: 'system' | 'gemini' | 'gemini-raw' | 'fallback' | 'local';
 }
 
 export const ChatBubble: React.FC<ChatBubbleProps> = ({
