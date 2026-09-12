@@ -69,6 +69,7 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
   const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>(DEFAULT_SUGGESTED_PROMPTS);
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const getTimestamp = () => {
     const now = new Date();
@@ -105,6 +106,15 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
     const timer = setTimeout(() => scrollToBottom('smooth'), 40);
     return () => clearTimeout(timer);
   }, [messages, isTyping, showUploadCard]);
+
+  // Keep the pinned input row above the on-screen keyboard on mobile by
+  // scrolling it into view when the field gains focus (iOS/Android Safari
+  // resize the viewport late, after the focus event, so a short delay helps).
+  const handleInputFocus = () => {
+    setTimeout(() => {
+      inputRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+    }, 250);
+  };
 
   const handleActionClick = (actionType: 'BUY_MEDICINES' | 'BOOK_CONSULTATION' | 'UPLOAD_PRESCRIPTION' | 'CARE_NURSES') => {
     switch (actionType) {
@@ -220,10 +230,6 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
     if (id === 'nurse') handleSelectCareNurses();
   };
 
-  // --- This is the function that actually changed ---------------------------
-  // It now calls your Express server's /api/chat, which runs the patched
-  // generateLocalReply() first (fast, free, handles stock/dosage/malaria/etc.
-  // correctly) and only calls Gemini when that genuinely finds no match.
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputValue).trim();
     if (!text) return;
@@ -266,7 +272,7 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
           sender: 'bot',
           text: data.reply,
           timestamp: getTimestamp(),
-          source: data.source || 'gemini', // 'local' | 'gemini' | 'gemini-raw' | 'fallback'
+          source: data.source || 'gemini',
           action: data.recommendedAction
             ? { type: data.recommendedAction, label: data.actionLabel || 'Proceed to service', detail: data.actionDetail || undefined }
             : null,
@@ -277,7 +283,6 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
         setSuggestedPrompts(data.suggestedPrompts);
       }
     } catch (err) {
-      // Server unreachable — rare. Real "smart" logic lives in /api/chat now.
       console.warn('Chat API error:', err);
       setIsTyping(false);
       setMessages((prev) => [
@@ -293,7 +298,6 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
       ]);
     }
   };
-  // ---------------------------------------------------------------------------
 
   const handleResetChat = () => {
     setShowUploadCard(false);
@@ -310,53 +314,66 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
   };
 
   return (
-    <div className="w-full max-w-2xl mx-auto px-2 sm:px-4 py-2">
-      <div className="w-full h-[620px] sm:h-[680px] md:h-[720px] flex flex-col bg-white rounded-2xl border border-[#E4DFD3] shadow-sm overflow-hidden relative">
-        {/* Top bar — one row, one job each */}
-        <div className="shrink-0 flex items-center justify-between gap-2 py-2.5 px-3 sm:px-4 bg-white border-b border-[#E4DFD3]">
+    // Full-bleed, app-like on phones (edge-to-edge, real viewport height that
+    // accounts for mobile browser chrome via `dvh`); reverts to the boxed
+    // widget on tablet/desktop.
+    <div className="w-full h-[100dvh] sm:h-auto sm:max-w-2xl sm:mx-auto sm:px-4 sm:py-2">
+      <div className="w-full h-full sm:h-[680px] md:h-[720px] flex flex-col bg-white sm:rounded-2xl border-0 sm:border sm:border-[#E4DFD3] sm:shadow-sm overflow-hidden relative">
+        {/* Top bar */}
+        <div
+          className="shrink-0 flex items-center justify-between gap-2 px-3 sm:px-4 bg-white border-b border-[#E4DFD3]"
+          style={{ paddingTop: 'calc(0.5rem + env(safe-area-inset-top))', paddingBottom: '0.5rem' }}
+        >
           <div className="flex items-center gap-2 min-w-0">
             <span className="relative flex h-2 w-2 shrink-0">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#0B5D52] opacity-60" />
               <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0B5D52]" />
             </span>
-            <span className="font-bold text-[#16231F] text-xs truncate">Curadeck Concierge</span>
+            <span className="font-bold text-[#16231F] text-[13px] truncate">Curadeck Concierge</span>
           </div>
 
-          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
-            <button
-              onClick={() => setShowSafetyModal(true)}
-              className="flex items-center gap-1 text-[11px] font-semibold text-[#8A6A1F] bg-[#FBF1DE] hover:bg-[#F5E6C4] border border-[#EBD9A8] px-2 py-1 rounded-lg transition-colors cursor-pointer"
-              title="Non-advisory policy and licensing"
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">PCN #LA/8892</span>
-            </button>
+          <div className="flex items-center gap-1 shrink-0">
             <a
               href="tel:+2348002872332"
-              className="hidden xs:flex items-center gap-1 text-[11px] font-bold text-[#0B5D52] bg-[#EAF3F0] hover:bg-[#DDEDE7] px-2 py-1 rounded-lg transition-colors"
+              className="flex items-center justify-center gap-1 w-9 h-9 sm:w-auto sm:px-2.5 sm:py-1.5 rounded-lg text-[#0B5D52] bg-[#EAF3F0] active:bg-[#DDEDE7] transition-colors"
+              aria-label="Call Curadeck support"
+              title="Call support"
             >
-              <PhoneCall className="w-3 h-3" />
-              <span className="hidden sm:inline">0800-CURADECK</span>
+              <PhoneCall className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline text-[11px] font-bold">0800-CURADECK</span>
             </a>
             <button
+              onClick={() => setShowSafetyModal(true)}
+              className="flex items-center justify-center gap-1 w-9 h-9 sm:w-auto sm:px-2.5 sm:py-1.5 rounded-lg text-[#8A6A1F] bg-[#FBF1DE] active:bg-[#F5E6C4] border border-[#EBD9A8] transition-colors"
+              title="Licensing & compliance"
+              aria-label="Licensing and compliance information"
+            >
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline text-[11px] font-semibold">PCN #LA/8892</span>
+            </button>
+            <button
               onClick={handleResetChat}
-              className="p-1.5 rounded-lg text-[#8A8175] hover:text-[#16231F] hover:bg-[#F0ECE2] transition-colors cursor-pointer"
+              className="flex items-center justify-center w-9 h-9 rounded-lg text-[#8A8175] active:text-[#16231F] active:bg-[#F0ECE2] transition-colors"
               title="Start a new conversation"
               aria-label="Reset conversation"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
+              <RefreshCw className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Scrollable chat container — the only scrolling element */}
-        <div ref={chatContainerRef} className="flex-1 overflow-y-auto min-h-0 bg-[#FBF9F4]">
-          {/* Quick actions — solid bg, no blur, sits above the message stream */}
+        {/* Scrollable chat container */}
+        <div
+          ref={chatContainerRef}
+          className="flex-1 overflow-y-auto min-h-0 bg-[#FBF9F4]"
+          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        >
+          {/* Quick actions */}
           <div className="sticky top-0 z-20 bg-[#FBF9F4] border-b border-[#E4DFD3] px-3 sm:px-4 py-2">
             <button
               type="button"
               onClick={() => setShowPrimaryOptions(!showPrimaryOptions)}
-              className="w-full flex items-center justify-between cursor-pointer"
+              className="w-full flex items-center justify-between py-1 -my-1"
             >
               <p className="text-[11px] font-bold text-[#6B6157]">Quick actions</p>
               {showPrimaryOptions ? (
@@ -373,14 +390,14 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
                     key={id}
                     type="button"
                     onClick={() => handleQuickAction(id)}
-                    className="flex items-center gap-2 p-2 rounded-xl bg-white hover:bg-[#EAF3F0] border border-[#E4DFD3] hover:border-[#0B5D52]/40 text-left transition-colors cursor-pointer"
+                    className="flex items-center gap-2 p-2.5 min-h-[52px] rounded-xl bg-white active:bg-[#EAF3F0] border border-[#E4DFD3] active:border-[#0B5D52]/40 text-left transition-colors"
                   >
-                    <div className="w-7 h-7 rounded-lg bg-[#EAF3F0] text-[#0B5D52] flex items-center justify-center shrink-0">
-                      <Icon className="w-3.5 h-3.5" />
+                    <div className="w-8 h-8 rounded-lg bg-[#EAF3F0] text-[#0B5D52] flex items-center justify-center shrink-0">
+                      <Icon className="w-4 h-4" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="font-bold text-[#16231F] text-xs truncate">{label}</p>
-                      <p className="text-[10px] text-[#6B6157] truncate">{detail}</p>
+                      <p className="font-bold text-[#16231F] text-[12.5px] leading-snug truncate">{label}</p>
+                      <p className="text-[10.5px] text-[#6B6157] truncate">{detail}</p>
                     </div>
                   </button>
                 ))}
@@ -389,13 +406,19 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
           </div>
 
           <div className="p-3 sm:p-4 space-y-3.5">
-            {/* One compliance notice, stated once */}
-            <div className="p-2.5 bg-[#FBF1DE] border border-[#EBD9A8] rounded-xl flex items-start gap-2 text-[11px] text-[#5C4415] leading-relaxed">
+            {/* Compact compliance notice — tap for full detail, instead of a
+                permanent paragraph competing with the conversation for space */}
+            <button
+              type="button"
+              onClick={() => setShowSafetyModal(true)}
+              className="w-full flex items-start gap-2 p-2.5 bg-[#FBF1DE] border border-[#EBD9A8] rounded-xl text-left"
+            >
               <AlertTriangle className="w-3.5 h-3.5 text-[#8A6A1F] shrink-0 mt-0.5" />
-              <p>
-                Curadeck Concierge helps you navigate the platform and check stock — it does not diagnose or advise on treatment. For clinical care, talk to a licensed doctor or pharmacist.
+              <p className="text-[11px] text-[#5C4415] leading-relaxed">
+                Concierge helps you navigate and check stock — it doesn't diagnose or advise on treatment.{' '}
+                <span className="font-bold underline underline-offset-2">Learn more</span>
               </p>
-            </div>
+            </button>
 
             {messages.map((msg) => (
               <ChatBubble
@@ -427,14 +450,17 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
         </div>
 
         {/* Pinned input area */}
-        <div className="shrink-0 border-t border-[#E4DFD3] bg-white p-2.5 sm:p-3 space-y-2">
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+        <div
+          className="shrink-0 border-t border-[#E4DFD3] bg-white px-2.5 sm:px-3 pt-2.5 sm:pt-3 space-y-2"
+          style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
+        >
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
             {suggestedPrompts.map((prompt, idx) => (
               <button
                 key={idx}
                 type="button"
                 onClick={() => handleSendMessage(prompt)}
-                className="text-[11px] font-medium text-[#16231F] bg-[#F0ECE2] hover:bg-[#EAF3F0] hover:text-[#0B5D52] border border-transparent hover:border-[#0B5D52]/30 rounded-full px-2.5 py-1 whitespace-nowrap transition-colors cursor-pointer shrink-0"
+                className="text-[11px] font-medium text-[#16231F] bg-[#F0ECE2] active:bg-[#EAF3F0] active:text-[#0B5D52] border border-transparent active:border-[#0B5D52]/30 rounded-full px-2.5 py-1.5 whitespace-nowrap transition-colors shrink-0"
               >
                 {prompt}
               </button>
@@ -443,9 +469,11 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
 
           <div className="relative bg-white border border-[#E4DFD3] rounded-xl p-1 flex items-center gap-2 focus-within:border-[#0B5D52] focus-within:ring-2 focus-within:ring-[#0B5D52]/15 transition-all">
             <input
+              ref={inputRef}
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
+              onFocus={handleInputFocus}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -453,20 +481,22 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
                 }
               }}
               placeholder="Ask about stock, doctor sessions, delivery..."
-              className="flex-1 bg-transparent px-3 py-1.5 text-base sm:text-xs text-[#16231F] placeholder:text-[#8A8175] focus:outline-none"
+              autoComplete="off"
+              enterKeyHint="send"
+              className="flex-1 min-w-0 bg-transparent px-3 py-2 text-base text-[#16231F] placeholder:text-[#8A8175] focus:outline-none"
             />
             <button
               type="button"
               onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || isTyping}
-              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer shrink-0 ${
+              className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
                 inputValue.trim() && !isTyping
-                  ? 'bg-[#0B5D52] text-white hover:bg-[#0E6E60]'
-                  : 'bg-[#F0ECE2] text-[#B5AEA0] cursor-not-allowed'
+                  ? 'bg-[#0B5D52] text-white active:bg-[#0E6E60]'
+                  : 'bg-[#F0ECE2] text-[#B5AEA0]'
               }`}
               aria-label="Send message"
             >
-              <Send className="w-3.5 h-3.5" />
+              <Send className="w-4 h-4" />
             </button>
           </div>
 
@@ -476,23 +506,29 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
         </div>
       </div>
 
-      {/* Safety & compliance modal */}
+      {/* Safety & compliance modal — bottom sheet on mobile, centered dialog on desktop */}
       {showSafetyModal && (
-        <div className="fixed inset-0 z-50 bg-[#16231F]/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-[#E4DFD3] space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-[#16231F]/60 flex items-end sm:items-center justify-center">
+          <div
+            className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-2xl p-5 sm:p-6 shadow-2xl border border-[#E4DFD3] space-y-4 overflow-y-auto"
+            style={{ maxHeight: '85dvh', paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))' }}
+          >
+            {/* Drag-handle affordance, mobile only */}
+            <div className="sm:hidden w-9 h-1 bg-[#E4DFD3] rounded-full mx-auto -mt-1 mb-1" />
+
             <div className="flex items-center justify-between pb-3 border-b border-[#EEEAE0]">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#FBF1DE] border border-[#EBD9A8] flex items-center justify-center text-[#8A6A1F]">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-[#FBF1DE] border border-[#EBD9A8] flex items-center justify-center text-[#8A6A1F] shrink-0">
                   <ShieldCheck className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-base font-bold text-[#16231F]">Medical & compliance standards</h3>
-                  <p className="text-xs text-[#6B6157]">PCN & MDCN regulatory safeguards</p>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-[#16231F] truncate">Medical & compliance standards</h3>
+                  <p className="text-xs text-[#6B6157] truncate">PCN & MDCN regulatory safeguards</p>
                 </div>
               </div>
               <button
                 onClick={() => setShowSafetyModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F0ECE2] hover:bg-[#E4DFD3] text-[#6B6157] flex items-center justify-center cursor-pointer transition-colors"
+                className="w-9 h-9 rounded-full bg-[#F0ECE2] active:bg-[#E4DFD3] text-[#6B6157] flex items-center justify-center transition-colors shrink-0"
                 aria-label="Close"
               >
                 <X className="w-4 h-4" />
@@ -544,7 +580,7 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
 
             <button
               onClick={() => setShowSafetyModal(false)}
-              className="w-full py-2.5 px-4 rounded-xl bg-[#0B5D52] hover:bg-[#0E6E60] text-white font-bold text-xs transition-colors cursor-pointer"
+              className="w-full py-3 px-4 rounded-xl bg-[#0B5D52] active:bg-[#0E6E60] text-white font-bold text-xs transition-colors"
             >
               I understand
             </button>
