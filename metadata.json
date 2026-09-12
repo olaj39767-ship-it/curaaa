@@ -1,0 +1,6 @@
+{
+  "name": "Curadeck - Online Medication Procurement & Care Platform",
+  "description": "Nigerian online healthcare platform offering fixed-price medications, custom drug list quotes, teleconference pharmacist consultations, and vetted home care nurses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

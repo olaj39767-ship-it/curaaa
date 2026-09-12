@@ -1,0 +1,71 @@
+{
+  "entities": {
+    "UserProfile": {
+      "collection": "users",
+      "fields": {
+        "id": "string",
+        "email": "string",
+        "name": "string",
+        "phone": "string",
+        "role": "string",
+        "address": "string",
+        "city": "string",
+        "state": "string",
+        "createdAt": "string",
+        "updatedAt": "string"
+      }
+    },
+    "Medication": {
+      "collection": "medications",
+      "fields": {
+        "id": "string",
+        "name": "string",
+        "genericName": "string",
+        "brand": "string",
+        "category": "string",
+        "price": "number",
+        "unit": "string",
+        "inStock": "boolean",
+        "stockCount": "number",
+        "prescriptionRequired": "boolean",
+        "image": "string",
+        "description": "string",
+        "dosage": "string",
+        "sideEffects": "array",
+        "manufacturer": "string",
+        "nafdacNo": "string",
+        "popular": "boolean",
+        "createdAt": "string",
+        "updatedAt": "string"
+      }
+    },
+    "OrderOrRequest": {
+      "collection": "orders_and_requests",
+      "fields": {
+        "id": "string",
+        "referenceNo": "string",
+        "type": "string",
+        "status": "string",
+        "patientName": "string",
+        "patientEmail": "string",
+        "patientPhone": "string",
+        "deliveryAddress": "string",
+        "deliveryCity": "string",
+        "deliveryState": "string",
+        "items": "array",
+        "subtotal": "number",
+        "teleconferenceFee": "number",
+        "deliveryFee": "number",
+        "total": "number",
+        "paymentMethod": "string",
+        "paymentReference": "string",
+        "prescriptionFileUrl": "string",
+        "notes": "string",
+        "pharmacistNote": "string",
+        "estimatedDelivery": "string",
+        "createdAt": "string",
+        "updatedAt": "string"
+      }
+    }
+  }
+}

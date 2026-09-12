@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if request is from authenticated user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // User Profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+      allow delete: if false;
+    }
+
+    // Medications collection: Public read for browsing catalog, write for catalog management
+    match /medications/{medicationId} {
+      allow read, write: if true;
+    }
+
+    // Orders and requests (prescriptions, orders, bookings)
+    match /orders_and_requests/{orderId} {
+      allow read, create, update: if true;
+      allow delete: if isAuthenticated();
+    }
+  }
+}
