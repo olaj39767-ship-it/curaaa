@@ -20,6 +20,7 @@ import { ChatBubble, ChatAction } from '../components/chat/ChatBubble';
 import { TypingIndicator } from '../components/chat/TypingIndicator';
 import { PrescriptionUploadCard } from '../components/chat/PrescriptionUploadCard';
 import { Medicine } from '../types';
+import { getLocalReply } from '../lib/localAssistant';
 
 interface ChatLandingViewProps {
   onNavigateToMarket: () => void;
@@ -220,74 +221,35 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
     if (id === 'nurse') handleSelectCareNurses();
   };
 
-  const handleSendMessage = async (textToSend?: string) => {
-    const text = (textToSend || inputValue).trim();
-    if (!text) return;
 
-    setInputValue('');
-    setMessages((prev) => [...prev, { id: 'usr_' + Date.now(), sender: 'user', text, timestamp: getTimestamp() }]);
-    setIsTyping(true);
+const handleSendMessage = async (textToSend?: string) => {
+  const text = (textToSend || inputValue).trim();
+  if (!text) return;
 
-    try {
-      const historyPayload = messages
-        .filter((m) => m.text && m.sender)
-        .map((m) => ({ role: m.sender === 'user' ? ('user' as const) : ('model' as const), text: m.text || '' }));
+  setInputValue('');
+  setMessages((prev) => [...prev, { id: 'usr_' + Date.now(), sender: 'user', text, timestamp: getTimestamp() }]);
+  setIsTyping(true);
 
-      const inventoryPayload = (medicines || []).map((m) => ({
-        id: m.id,
-        name: m.name,
-        genericName: m.genericName,
-        category: m.category,
-        price: m.price,
-        inStock: m.inStock,
-        stockCount: m.stockCount !== undefined ? m.stockCount : m.inStock ? 50 : 0,
-        unit: m.unit,
-        prescriptionRequired: m.prescriptionRequired,
-      }));
+  const local = getLocalReply(text, medicines);
 
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history: historyPayload, inventory: inventoryPayload }),
-      });
-
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-      const data = await res.json();
-      setIsTyping(false);
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: 'bot_' + Date.now(),
-          sender: 'bot',
-          text: data.reply,
-          timestamp: getTimestamp(),
-          source: data.source || 'gemini',
-          action: data.recommendedAction
-            ? { type: data.recommendedAction, label: data.actionLabel || 'Proceed to service', detail: data.actionDetail || undefined }
-            : null,
-        },
-      ]);
-
-      if (Array.isArray(data.suggestedPrompts) && data.suggestedPrompts.length > 0) {
-        setSuggestedPrompts(data.suggestedPrompts);
-      }
-    } catch (err) {
-      console.warn('Chat API error:', err);
-      setIsTyping(false);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: 'bot_' + Date.now(),
-          sender: 'bot',
-          text: 'I can help connect you with a licensed doctor, submit a prescription for pharmacist review, or find genuine, NAFDAC-approved medications. What would you like to do?',
-          timestamp: getTimestamp(),
-          source: 'fallback',
-          action: { type: 'BOOK_CONSULTATION', label: 'Consult a licensed doctor', detail: 'Video session from ₦2,500' },
-        },
-      ]);
-    }
-  };
+  setTimeout(() => {
+    setIsTyping(false);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: 'bot_' + Date.now(),
+        sender: 'bot',
+        text: local.reply,
+        timestamp: getTimestamp(),
+        source: 'system',
+        action: local.recommendedAction
+          ? { type: local.recommendedAction, label: local.actionLabel || 'Proceed', detail: local.actionDetail }
+          : null,
+      },
+    ]);
+    if (local.suggestedPrompts) setSuggestedPrompts(local.suggestedPrompts);
+  }, 300);
+};
 
   const handleResetChat = () => {
     setShowUploadCard(false);
