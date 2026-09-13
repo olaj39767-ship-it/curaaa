@@ -90,22 +90,43 @@ export interface HistoryItem {
 const SAFETY_NOTICE =
   '*Notice: Curadeck Concierge provides platform navigation only and does not offer medical advice, clinical diagnoses, or medication advisories.*';
 
-// Words to strip out of a message so what's left is (hopefully) just a product
-// name. Deliberately generous — cheap to extend as you see real queries.
-const FILLER = new RegExp(
-  [
-    'is there', 'do you have', 'do you sell', 'do you stock', 'got any', 'have any',
-    'i need', 'i want', 'i am looking for', "i'm looking for", 'looking for',
-    'where can i find', 'where can i get', 'can i get', 'can i buy', 'get me',
-    'need to buy', 'want to buy', 'buy', 'find', 'need', 'want',
-    'check', 'stock', 'available', 'availability',
-    'how much', 'price of', 'cost of', 'price for', 'please',
-  ].join('|'),
-  'gi'
-);
+// Individual stopwords to strip token-by-token — far more robust than
+// matching exact phrases, since real messages vary ("do u have", "do you
+// have", "got", "you guys have"...) in ways a fixed phrase list can't cover.
+const STOPWORDS = new Set([
+  'is', 'there', 'do', 'does', 'did', 'you', 'u', 'ur', 'guys', 'have', 'has',
+  'any', 'are', 'can', 'i', 'im', "i'm", 'get', 'got', 'me', 'need', 'needs',
+  'needed', 'want', 'wants', 'wanted', 'looking', 'look', 'for', 'a', 'an',
+  'the', 'to', 'buy', 'purchase', 'sell', 'check', 'stock', 'available',
+  'availability', 'please', 'pls', 'plz', 'abeg', 'how', 'much', 'price',
+  'cost', 'of', 'on', 'mean', 'meant', 'about', 'also', 'too', 'sef',
+]);
 
-function extractQueryTerm(text: string): string {
-  return text.replace(FILLER, ' ').replace(/\s+/g, ' ').trim();
+// Words that signal "this message is a product request" — checked as whole
+// words, not exact phrases, so "do u have" and "do you have" both count.
+const INTENT_WORDS = [
+  'have', 'need', 'want', 'buy', 'get', 'check', 'stock', 'available',
+  'price', 'cost', 'looking', 'find', 'purchase', 'order', 'sell', 'got',
+];
+
+function cleanTerm(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w && !STOPWORDS.has(w))
+    .join(' ')
+    .trim();
+}
+
+// Splits a message into separate product candidates on "or" / "and" /
+// commas / slashes, so "panadol or panadol extra" is checked as TWO
+// candidates instead of one garbled search term that matches nothing.
+function splitCandidates(message: string): string[] {
+  return message
+    .split(/\b(?:or|and)\b|[,/]/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function buildInventoryIndex(inventory: InventoryItem[]) {
@@ -116,12 +137,13 @@ function buildInventoryIndex(inventory: InventoryItem[]) {
   });
 }
 
-// IMPORTANT: create a fresh RegExp every call. Reusing one `g`-flagged
-// RegExp across .test() calls carries `lastIndex` state between calls and
-// causes intermittent false negatives (works sometimes, silently fails
+// IMPORTANT: create a fresh RegExp every call for any `g`-flagged pattern —
+// reusing one across .test() calls carries `lastIndex` state between calls
+// and causes intermittent false negatives (works sometimes, silently fails
 // other times, looks "random" from the outside).
 function hasProductIntent(text: string): boolean {
-  return new RegExp(FILLER.source, 'i').test(text);
+  const lower = text.toLowerCase();
+  return INTENT_WORDS.some((w) => new RegExp(`\\b${w}\\b`, 'i').test(lower));
 }
 
 // Words that mean "this is a symptom/clinical/logistics statement, not a
@@ -137,49 +159,81 @@ function tryInventoryMatch(userMessage: string, inventory?: InventoryItem[]): Lo
   const intentSignal = hasProductIntent(userMessage);
   const safetySignal = SAFETY_KEYWORDS.test(userMessage);
 
-  const term = extractQueryTerm(userMessage);
-  if (term.length < 2) return null;
+  const candidates = splitCandidates(userMessage)
+    .map(cleanTerm)
+    .filter((t) => t.length >= 2);
+  if (candidates.length === 0) return null;
 
   const fuse = buildInventoryIndex(inventory);
-  const results = fuse.search(term, { limit: 1 });
+  const hitsByName = new Map<string, InventoryItem>();
 
-  if (results.length === 0) {
+  for (const term of candidates) {
+    const results = fuse.search(term, { limit: 1 });
+    if (results.length > 0) {
+      hitsByName.set(results[0].item.name, results[0].item);
+    }
+  }
+
+  if (hitsByName.size === 0) {
     if (!intentSignal || safetySignal) return null;
-    const wordCount = term.split(' ').filter(Boolean).length;
-    if (wordCount > 4) return null;
+    const maxWords = Math.max(...candidates.map((c) => c.split(' ').filter(Boolean).length));
+    if (maxWords > 5) return null;
 
+    const displayTerm = candidates.join(' / ');
     return {
-      reply: `I couldn't find "${term}" in the catalog right now, but our PCN-licensed pharmacists can try to source it for you. Upload a prescription slip or note with the details and we'll confirm availability and pricing within 30 minutes.\n\n${SAFETY_NOTICE}`,
+      reply: `I couldn't find "${displayTerm}" in the catalog right now, but our PCN-licensed pharmacists can try to source it for you. Upload a prescription slip or note with the details and we'll confirm availability and pricing within 30 minutes.\n\n${SAFETY_NOTICE}`,
       recommendedAction: 'UPLOAD_PRESCRIPTION',
-      actionLabel: `Request "${term}"`,
+      actionLabel: `Request "${displayTerm}"`,
       actionDetail: 'Pharmacists confirm sourcing within 30 mins',
       suggestedPrompts: ['Upload prescription slip', 'Browse medicine catalog', 'Book a doctor consultation'],
       matched: true,
     };
   }
 
-  const med = results[0].item;
-  const stock = med.stockCount !== undefined ? med.stockCount : med.inStock ? 50 : 0;
-  const inStock = med.inStock && stock > 0;
-  const priceStr = `₦${Number(med.price).toLocaleString()}`;
+  const matches = Array.from(hitsByName.values());
 
-  if (inStock) {
+  if (matches.length === 1) {
+    const med = matches[0];
+    const stock = med.stockCount !== undefined ? med.stockCount : med.inStock ? 50 : 0;
+    const inStock = med.inStock && stock > 0;
+    const priceStr = `₦${Number(med.price).toLocaleString()}`;
+
+    if (inStock) {
+      return {
+        reply: `Yes! **${med.name}** is currently in stock. We have **${stock} units available** at **${priceStr}** per ${med.unit || 'pack'}.\n\nFast dispatch is available within 2-4 hours across Lagos Island and Mainland in cold-chain packaging.\n\n${SAFETY_NOTICE}`,
+        recommendedAction: 'BUY_MEDICINES',
+        actionLabel: `View ${med.name} in Market Floor`,
+        actionDetail: `${priceStr} • ${stock} in stock`,
+        suggestedPrompts: [`Add ${med.name} to cart`, 'Check other medicines in stock', 'How fast is Lagos delivery?'],
+        matched: true,
+      };
+    }
+
     return {
-      reply: `Yes! **${med.name}** is currently in stock. We have **${stock} units available** at **${priceStr}** per ${med.unit || 'pack'}.\n\nFast dispatch is available within 2-4 hours across Lagos Island and Mainland in cold-chain packaging.\n\n${SAFETY_NOTICE}`,
-      recommendedAction: 'BUY_MEDICINES',
-      actionLabel: `View ${med.name} in Market Floor`,
-      actionDetail: `${priceStr} • ${stock} in stock`,
-      suggestedPrompts: [`Add ${med.name} to cart`, 'Check other medicines in stock', 'How fast is Lagos delivery?'],
+      reply: `**${med.name}** is currently out of stock (0 units remaining in our central pharmacy inventory). However, our PCN-licensed clinical pharmacists can procure it for you if you upload your doctor's prescription slip.\n\n${SAFETY_NOTICE}`,
+      recommendedAction: 'UPLOAD_PRESCRIPTION',
+      actionLabel: 'Upload Prescription Slip to Procure',
+      actionDetail: "Our duty pharmacists will source it within 30 mins",
+      suggestedPrompts: ['Upload doctor prescription slip', 'Browse in-stock medications', 'Consult a doctor online'],
       matched: true,
     };
   }
 
+  const lines = matches.map((med) => {
+    const stock = med.stockCount !== undefined ? med.stockCount : med.inStock ? 50 : 0;
+    const inStock = med.inStock && stock > 0;
+    const priceStr = `₦${Number(med.price).toLocaleString()}`;
+    return inStock
+      ? `✅ **${med.name}** — in stock, ${stock} units at ${priceStr} per ${med.unit || 'pack'}`
+      : `⛔ **${med.name}** — currently out of stock`;
+  });
+
   return {
-    reply: `**${med.name}** is currently out of stock (0 units remaining in our central pharmacy inventory). However, our PCN-licensed clinical pharmacists can procure it for you if you upload your doctor's prescription slip.\n\n${SAFETY_NOTICE}`,
-    recommendedAction: 'UPLOAD_PRESCRIPTION',
-    actionLabel: 'Upload Prescription Slip to Procure',
-    actionDetail: "Our duty pharmacists will source it within 30 mins",
-    suggestedPrompts: ['Upload doctor prescription slip', 'Browse in-stock medications', 'Consult a doctor online'],
+    reply: `Here's what I found:\n\n${lines.join('\n')}\n\nFast dispatch is available within 2-4 hours across Lagos Island and Mainland in cold-chain packaging.\n\n${SAFETY_NOTICE}`,
+    recommendedAction: 'BUY_MEDICINES',
+    actionLabel: 'View in Market Floor',
+    actionDetail: `${matches.length} items found`,
+    suggestedPrompts: ['Add these to cart', 'Check delivery time', 'Browse full catalog'],
     matched: true,
   };
 }
