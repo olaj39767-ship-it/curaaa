@@ -15,6 +15,9 @@ import {
   FileText,
   CheckCircle2,
   Stethoscope,
+  User,
+  Store,
+  Warehouse,
 } from 'lucide-react';
 import { ChatBubble, ChatAction } from '../components/chat/ChatBubble';
 import { TypingIndicator } from '../components/chat/TypingIndicator';
@@ -38,20 +41,73 @@ interface Message {
   source?: 'gemini' | 'gemini-raw' | 'fallback' | 'system' | 'local';
 }
 
-const DEFAULT_SUGGESTED_PROMPTS = [
-  'Is Coartem in stock?',
-  'Check Augmentin 625mg stock',
-  'Book a doctor teleconsultation',
-  'Upload doctor prescription',
-  'How fast is Lagos delivery?',
+type CustomerType = 'individual' | 'retailer' | 'wholesaler';
+
+interface CustomerTypeOption {
+  id: CustomerType;
+  label: string;
+  detail: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+const CUSTOMER_TYPE_OPTIONS: CustomerTypeOption[] = [
+  { id: 'individual', label: "I'm a patient", detail: 'Order medicine or see a doctor', icon: User },
+  { id: 'retailer', label: "I'm a retailer", detail: 'Pharmacy or store restocking', icon: Store },
+  { id: 'wholesaler', label: "I'm a wholesaler", detail: 'Supplying or sourcing stock', icon: Warehouse },
 ];
 
-const QUICK_ACTIONS = [
-  { id: 'buy', label: 'Buy medicines', detail: '2,500+ items · Lagos in 2–4h', icon: Pill },
-  { id: 'consult', label: 'Book a doctor', detail: 'Video call · from ₦2,500', icon: Video },
-  { id: 'upload', label: 'Upload prescription', detail: 'Pharmacist review · 30 min', icon: UploadCloud },
-  { id: 'nurse', label: 'Hire a care nurse', detail: 'Home visits · from ₦12,000', icon: HeartHandshake },
-] as const;
+const GREETINGS: Record<CustomerType, string> = {
+  individual:
+    'Hello! Welcome to Curadeck. 👋\n\nI can check real-time medication stock, help you upload a prescription slip for pharmacist review, or connect you with a licensed doctor.',
+  retailer:
+    "Hello! Welcome to Curadeck Wholesale. 👋\n\nI can check bulk stock availability, take your restock order list, and get you trade pricing for your pharmacy or store.",
+  wholesaler:
+    'Hello! Welcome to Curadeck Sourcing. 👋\n\nShare your available product or price list and our sourcing team will reach out if it fits our current supply needs.',
+};
+
+const SUGGESTED_PROMPTS: Record<CustomerType, string[]> = {
+  individual: [
+    'Is Coartem in stock?',
+    'Check Augmentin 625mg stock',
+    'Book a doctor teleconsultation',
+    'Upload doctor prescription',
+    'How fast is Lagos delivery?',
+  ],
+  retailer: [
+    'Check bulk stock for Coartem',
+    'Get trade pricing',
+    'Upload my restock list',
+    'Lagos wholesale delivery times',
+  ],
+  wholesaler: [
+    'Upload my product list',
+    'What are you currently sourcing?',
+    'Share our pricing sheet',
+    'Speak to the sourcing team',
+  ],
+};
+
+const getQuickActions = (customerType: CustomerType) => {
+  const all = [
+    { id: 'buy' as const, label: 'Buy medicines', detail: '2,500+ items · Lagos in 2–4h', icon: Pill },
+    { id: 'consult' as const, label: 'Book a doctor', detail: 'Video call · from ₦2,500', icon: Video },
+    {
+      id: 'upload' as const,
+      label: customerType === 'individual' ? 'Upload prescription' : 'Upload prescription / list',
+      detail: customerType === 'individual' ? 'Pharmacist review · 30 min' : 'Patients, retailers & wholesalers · 30 min',
+      icon: UploadCloud,
+    },
+    { id: 'nurse' as const, label: 'Hire a care nurse', detail: 'Home visits · from ₦12,000', icon: HeartHandshake },
+  ];
+
+  // Retailers/wholesalers are here for bulk stock and list uploads first —
+  // doctor consults and home-care nursing aren't relevant to that flow, so
+  // put "upload" first and drop those two rather than clutter the grid.
+  if (customerType !== 'individual') {
+    return [all[0], all[2]];
+  }
+  return all;
+};
 
 export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
   onNavigateToMarket,
@@ -60,13 +116,14 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
   onNavigateToNurses,
   medicines = [],
 }) => {
+  const [customerType, setCustomerType] = useState<CustomerType | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [isTyping, setIsTyping] = useState<boolean>(true);
+  const [isTyping, setIsTyping] = useState<boolean>(false);
   const [showPrimaryOptions, setShowPrimaryOptions] = useState<boolean>(true);
   const [showUploadCard, setShowUploadCard] = useState<boolean>(false);
   const [showSafetyModal, setShowSafetyModal] = useState<boolean>(false);
   const [inputValue, setInputValue] = useState<string>('');
-  const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>(DEFAULT_SUGGESTED_PROMPTS);
+  const [suggestedPrompts, setSuggestedPrompts] = useState<string[]>(SUGGESTED_PROMPTS.individual);
 
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -85,27 +142,31 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
     }
   };
 
-  useEffect(() => {
+  // Chat only starts once the person has told us what they are — this
+  // replaces the old mount-triggered greeting.
+  const handleSelectCustomerType = (type: CustomerType) => {
+    setCustomerType(type);
+    setSuggestedPrompts(SUGGESTED_PROMPTS[type]);
+    setIsTyping(true);
     const timer = setTimeout(() => {
       setIsTyping(false);
       setMessages([
         {
           id: 'greeting-1',
           sender: 'bot',
-          text: 'Hello! Welcome to Curadeck. 👋\n\nI can check real-time medication stock, help you upload a prescription slip for pharmacist review, or connect you with a licensed doctor.',
+          text: GREETINGS[type],
           timestamp: getTimestamp(),
           source: 'system',
         },
       ]);
     }, 500);
-
     return () => clearTimeout(timer);
-  }, []);
+  };
 
   useEffect(() => {
     const timer = setTimeout(() => scrollToBottom('smooth'), 40);
     return () => clearTimeout(timer);
-  }, [messages, isTyping, showUploadCard]);
+  }, [messages, isTyping, showUploadCard, customerType]);
 
   // Keep the pinned input row above the on-screen keyboard on mobile by
   // scrolling it into view when the field gains focus (iOS/Android Safari
@@ -180,9 +241,15 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
   };
 
   const handleSelectUploadPrescription = () => {
+    const isB2B = customerType !== 'individual';
     setMessages((prev) => [
       ...prev,
-      { id: 'usr_' + Date.now(), sender: 'user', text: 'Upload prescription', timestamp: getTimestamp() },
+      {
+        id: 'usr_' + Date.now(),
+        sender: 'user',
+        text: isB2B ? 'Upload my list' : 'Upload prescription',
+        timestamp: getTimestamp(),
+      },
     ]);
     setIsTyping(true);
     setTimeout(() => {
@@ -193,7 +260,9 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
         {
           id: 'bot_' + Date.now(),
           sender: 'bot',
-          text: 'Add a photo of your prescription slip below. A licensed pharmacist will verify it and send itemized pricing within 30 minutes.',
+          text: isB2B
+            ? 'Add your order or product list below — as a file or typed in — and our team will review it within 30 minutes.'
+            : 'Add a photo of your prescription slip below, or type it in. A licensed pharmacist will verify it and send itemized pricing within 30 minutes.',
           timestamp: getTimestamp(),
           source: 'system',
         },
@@ -223,7 +292,7 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
     }, 400);
   };
 
-  const handleQuickAction = (id: (typeof QUICK_ACTIONS)[number]['id']) => {
+  const handleQuickAction = (id: 'buy' | 'consult' | 'upload' | 'nurse') => {
     if (id === 'buy') handleSelectBuyMedicines();
     if (id === 'consult') handleSelectConsultation();
     if (id === 'upload') handleSelectUploadPrescription();
@@ -258,7 +327,12 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history: historyPayload, inventory: inventoryPayload }),
+        body: JSON.stringify({
+          message: text,
+          history: historyPayload,
+          inventory: inventoryPayload,
+          customerType: customerType || 'individual',
+        }),
       });
 
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
@@ -301,17 +375,14 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
 
   const handleResetChat = () => {
     setShowUploadCard(false);
-    setSuggestedPrompts(DEFAULT_SUGGESTED_PROMPTS);
-    setMessages([
-      {
-        id: 'msg-reset',
-        sender: 'bot',
-        text: 'Welcome back to Curadeck! 👋 How can I help direct your healthcare request today?',
-        timestamp: getTimestamp(),
-        source: 'system',
-      },
-    ]);
+    setShowPrimaryOptions(true);
+    setCustomerType(null);
+    setMessages([]);
+    setIsTyping(false);
+    setSuggestedPrompts(SUGGESTED_PROMPTS.individual);
   };
+
+  const quickActions = getQuickActions(customerType || 'individual');
 
   return (
     // Full-bleed, app-like on phones (edge-to-edge, real viewport height that
@@ -362,148 +433,188 @@ export const ChatLandingView: React.FC<ChatLandingViewProps> = ({
           </div>
         </div>
 
-        {/* Scrollable chat container */}
-        <div
-          ref={chatContainerRef}
-          className="flex-1 overflow-y-auto min-h-0 bg-[#FBF9F4]"
-          style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
-        >
-          {/* Quick actions */}
-          <div className="sticky top-0 z-20 bg-[#FBF9F4] border-b border-[#E4DFD3] px-3 sm:px-4 py-2">
-            <button
-              type="button"
-              onClick={() => setShowPrimaryOptions(!showPrimaryOptions)}
-              className="w-full flex items-center justify-between py-1 -my-1"
-            >
-              <p className="text-[11px] font-bold text-[#6B6157]">Quick actions</p>
-              {showPrimaryOptions ? (
-                <ChevronUp className="w-4 h-4 text-[#6B6157]" />
-              ) : (
-                <ChevronDown className="w-4 h-4 text-[#6B6157]" />
-              )}
-            </button>
+        {customerType === null ? (
+          /* ---- Gate: find out who we're talking to before anything else ---- */
+          <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 bg-[#FBF9F4] text-center gap-6">
+            <div className="space-y-1.5">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-[#0B5D52] text-white flex items-center justify-center">
+                <Pill className="w-6 h-6 -rotate-45" />
+              </div>
+              <h2 className="text-base font-bold text-[#16231F]">Welcome to Curadeck</h2>
+              <p className="text-xs text-[#6B6157] max-w-xs">
+                Quick question first, so I can point you in the right direction — which one are you?
+              </p>
+            </div>
 
-            {showPrimaryOptions && (
-              <div className="grid grid-cols-2 gap-2 mt-2">
-                {QUICK_ACTIONS.map(({ id, label, detail, icon: Icon }) => (
+            <div className="w-full max-w-sm space-y-2.5">
+              {CUSTOMER_TYPE_OPTIONS.map(({ id, label, detail, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => handleSelectCustomerType(id)}
+                  className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-white border border-[#E4DFD3] active:border-[#0B5D52]/50 active:bg-[#EAF3F0] text-left transition-colors"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-[#EAF3F0] text-[#0B5D52] flex items-center justify-center shrink-0">
+                    <Icon className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-bold text-[#16231F] text-[13px]">{label}</p>
+                    <p className="text-[11px] text-[#6B6157]">{detail}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Scrollable chat container */}
+            <div
+              ref={chatContainerRef}
+              className="flex-1 overflow-y-auto min-h-0 bg-[#FBF9F4]"
+              style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+            >
+              {/* Quick actions */}
+              <div className="sticky top-0 z-20 bg-[#FBF9F4] border-b border-[#E4DFD3] px-3 sm:px-4 py-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPrimaryOptions(!showPrimaryOptions)}
+                  className="w-full flex items-center justify-between py-1 -my-1"
+                >
+                  <p className="text-[11px] font-bold text-[#6B6157]">Quick actions</p>
+                  {showPrimaryOptions ? (
+                    <ChevronUp className="w-4 h-4 text-[#6B6157]" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4 text-[#6B6157]" />
+                  )}
+                </button>
+
+                {showPrimaryOptions && (
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    {quickActions.map(({ id, label, detail, icon: Icon }) => (
+                      <button
+                        key={id}
+                        type="button"
+                        onClick={() => handleQuickAction(id)}
+                        className="flex items-center gap-2 p-2.5 min-h-[52px] rounded-xl bg-white active:bg-[#EAF3F0] border border-[#E4DFD3] active:border-[#0B5D52]/40 text-left transition-colors"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-[#EAF3F0] text-[#0B5D52] flex items-center justify-center shrink-0">
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-[#16231F] text-[12.5px] leading-snug truncate">{label}</p>
+                          <p className="text-[10.5px] text-[#6B6157] truncate">{detail}</p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3 sm:p-4 space-y-3.5">
+                {/* Compact compliance notice — tap for full detail, instead of a
+                    permanent paragraph competing with the conversation for space */}
+                <button
+                  type="button"
+                  onClick={() => setShowSafetyModal(true)}
+                  className="w-full flex items-start gap-2 p-2.5 bg-[#FBF1DE] border border-[#EBD9A8] rounded-xl text-left"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 text-[#8A6A1F] shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-[#5C4415] leading-relaxed">
+                    Concierge helps you navigate and check stock — it doesn't diagnose or advise on treatment.{' '}
+                    <span className="font-bold underline underline-offset-2">Learn more</span>
+                  </p>
+                </button>
+
+                {messages.map((msg) => (
+                  <ChatBubble
+                    key={msg.id}
+                    sender={msg.sender}
+                    message={msg.text}
+                    timestamp={msg.timestamp}
+                    action={msg.action}
+                    onActionClick={handleActionClick}
+                    source={msg.source}
+                  />
+                ))}
+
+                {isTyping && (
+                  <div className="flex items-start gap-2.5 sm:gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-[#0B5D52] text-white flex items-center justify-center shrink-0">
+                      <Pill className="w-4 h-4 -rotate-45" />
+                    </div>
+                    <TypingIndicator />
+                  </div>
+                )}
+
+                {showUploadCard && (
+                  <div className="pt-1">
+                    <PrescriptionUploadCard
+                      defaultCustomerType={customerType}
+                      onCancel={() => setShowUploadCard(false)}
+                      onContinueToWebQuote={() => onNavigateToUploadQuote()}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Pinned input area */}
+            <div
+              className="shrink-0 border-t border-[#E4DFD3] bg-white px-2.5 sm:px-3 pt-2.5 sm:pt-3 space-y-2"
+              style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
+            >
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+                {suggestedPrompts.map((prompt, idx) => (
                   <button
-                    key={id}
+                    key={idx}
                     type="button"
-                    onClick={() => handleQuickAction(id)}
-                    className="flex items-center gap-2 p-2.5 min-h-[52px] rounded-xl bg-white active:bg-[#EAF3F0] border border-[#E4DFD3] active:border-[#0B5D52]/40 text-left transition-colors"
+                    onClick={() => handleSendMessage(prompt)}
+                    className="text-[11px] font-medium text-[#16231F] bg-[#F0ECE2] active:bg-[#EAF3F0] active:text-[#0B5D52] border border-transparent active:border-[#0B5D52]/30 rounded-full px-2.5 py-1.5 whitespace-nowrap transition-colors shrink-0"
                   >
-                    <div className="w-8 h-8 rounded-lg bg-[#EAF3F0] text-[#0B5D52] flex items-center justify-center shrink-0">
-                      <Icon className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="font-bold text-[#16231F] text-[12.5px] leading-snug truncate">{label}</p>
-                      <p className="text-[10.5px] text-[#6B6157] truncate">{detail}</p>
-                    </div>
+                    {prompt}
                   </button>
                 ))}
               </div>
-            )}
-          </div>
 
-          <div className="p-3 sm:p-4 space-y-3.5">
-            {/* Compact compliance notice — tap for full detail, instead of a
-                permanent paragraph competing with the conversation for space */}
-            <button
-              type="button"
-              onClick={() => setShowSafetyModal(true)}
-              className="w-full flex items-start gap-2 p-2.5 bg-[#FBF1DE] border border-[#EBD9A8] rounded-xl text-left"
-            >
-              <AlertTriangle className="w-3.5 h-3.5 text-[#8A6A1F] shrink-0 mt-0.5" />
-              <p className="text-[11px] text-[#5C4415] leading-relaxed">
-                Concierge helps you navigate and check stock — it doesn't diagnose or advise on treatment.{' '}
-                <span className="font-bold underline underline-offset-2">Learn more</span>
+              <div className="relative bg-white border border-[#E4DFD3] rounded-xl p-1 flex items-center gap-2 focus-within:border-[#0B5D52] focus-within:ring-2 focus-within:ring-[#0B5D52]/15 transition-all">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onFocus={handleInputFocus}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  placeholder="Ask about stock, doctor sessions, delivery..."
+                  autoComplete="off"
+                  enterKeyHint="send"
+                  className="flex-1 min-w-0 bg-transparent px-3 py-2 text-base text-[#16231F] placeholder:text-[#8A8175] focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage()}
+                  disabled={!inputValue.trim() || isTyping}
+                  className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
+                    inputValue.trim() && !isTyping
+                      ? 'bg-[#0B5D52] text-white active:bg-[#0E6E60]'
+                      : 'bg-[#F0ECE2] text-[#B5AEA0]'
+                  }`}
+                  aria-label="Send message"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-[10px] text-[#8A8175] text-center">
+                In an emergency, go to the nearest hospital — Curadeck is not an emergency service.
               </p>
-            </button>
-
-            {messages.map((msg) => (
-              <ChatBubble
-                key={msg.id}
-                sender={msg.sender}
-                message={msg.text}
-                timestamp={msg.timestamp}
-                action={msg.action}
-                onActionClick={handleActionClick}
-                source={msg.source}
-              />
-            ))}
-
-            {isTyping && (
-              <div className="flex items-start gap-2.5 sm:gap-3">
-                <div className="w-8 h-8 rounded-xl bg-[#0B5D52] text-white flex items-center justify-center shrink-0">
-                  <Pill className="w-4 h-4 -rotate-45" />
-                </div>
-                <TypingIndicator />
-              </div>
-            )}
-
-            {showUploadCard && (
-              <div className="pt-1">
-                <PrescriptionUploadCard onCancel={() => setShowUploadCard(false)} onContinueToWebQuote={() => onNavigateToUploadQuote()} />
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Pinned input area */}
-        <div
-          className="shrink-0 border-t border-[#E4DFD3] bg-white px-2.5 sm:px-3 pt-2.5 sm:pt-3 space-y-2"
-          style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
-        >
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
-            {suggestedPrompts.map((prompt, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => handleSendMessage(prompt)}
-                className="text-[11px] font-medium text-[#16231F] bg-[#F0ECE2] active:bg-[#EAF3F0] active:text-[#0B5D52] border border-transparent active:border-[#0B5D52]/30 rounded-full px-2.5 py-1.5 whitespace-nowrap transition-colors shrink-0"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
-
-          <div className="relative bg-white border border-[#E4DFD3] rounded-xl p-1 flex items-center gap-2 focus-within:border-[#0B5D52] focus-within:ring-2 focus-within:ring-[#0B5D52]/15 transition-all">
-            <input
-              ref={inputRef}
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onFocus={handleInputFocus}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              placeholder="Ask about stock, doctor sessions, delivery..."
-              autoComplete="off"
-              enterKeyHint="send"
-              className="flex-1 min-w-0 bg-transparent px-3 py-2 text-base text-[#16231F] placeholder:text-[#8A8175] focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => handleSendMessage()}
-              disabled={!inputValue.trim() || isTyping}
-              className={`w-10 h-10 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
-                inputValue.trim() && !isTyping
-                  ? 'bg-[#0B5D52] text-white active:bg-[#0E6E60]'
-                  : 'bg-[#F0ECE2] text-[#B5AEA0]'
-              }`}
-              aria-label="Send message"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </div>
-
-          <p className="text-[10px] text-[#8A8175] text-center">
-            In an emergency, go to the nearest hospital — Curadeck is not an emergency service.
-          </p>
-        </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Safety & compliance modal — bottom sheet on mobile, centered dialog on desktop */}

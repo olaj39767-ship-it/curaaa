@@ -151,7 +151,7 @@ function hasProductIntent(text: string): boolean {
 // branches in generateLocalReply below, even if the message also happens
 // to contain an intent phrase like "i need" or "is there".
 const SAFETY_KEYWORDS =
-  /\b(malaria|coartem|lonart|amatem|fever|dosage|dose|prescription|\brx\b|slip|nurse|elderly|stroke|post-op|doctor|consult|sick|pain|diagnos|advice|child|delivery|lagos|shipping|hormonal|imbalance|symptom|infection|illness|disease|condition)\b/i;
+  /\b(malaria|coartem|lonart|amatem|fever|dosage|doses?|prescription|rx|slip|nurse|elderly|stroke|post-op|doctor|consult\w*|pharmacist\w*|sick|pain\w*|headache\w*|migraine\w*|diagnos\w*|advice|child\w*|delivery|lagos|shipping|hormon\w*|imbalance\w*|symptom\w*|infect\w*|illness\w*|disease\w*|condition\w*|drugs?|medicat\w*|medicine\w*|blood\s*pressure|bp|hypertension\w*)\b/i;
 
 function tryInventoryMatch(userMessage: string, inventory?: InventoryItem[]): LocalReply | null {
   if (!Array.isArray(inventory) || inventory.length === 0) return null;
@@ -270,12 +270,27 @@ function generateLocalReply(userMessage: string, inventory?: InventoryItem[]): L
     };
   }
 
+  if (lower.includes('pharmacist')) {
+    return {
+      reply:
+        "Our PCN-licensed duty pharmacists are available for a ₦500 teleconference to verify medications, check interactions, or answer questions about something in our catalog. Upload a prescription slip (or just note the medication name) and a pharmacist will follow up.\n\n" +
+        SAFETY_NOTICE,
+      recommendedAction: 'UPLOAD_PRESCRIPTION',
+      actionLabel: 'Start Pharmacist Review',
+      actionDetail: '₦500 duty pharmacist teleconference',
+      suggestedPrompts: ['Upload prescription slip', 'Book a doctor instead', 'Browse medicine catalog'],
+      matched: true,
+    };
+  }
+
   if (
     lower.includes('doctor') || lower.includes('consult') || lower.includes('sick') ||
     lower.includes('pain') || lower.includes('diagnos') || lower.includes('advice') ||
     lower.includes('child') || lower.includes('hormonal') || lower.includes('imbalance') ||
     lower.includes('symptom') || lower.includes('infection') || lower.includes('illness') ||
-    lower.includes('disease') || lower.includes('condition')
+    lower.includes('disease') || lower.includes('condition') || lower.includes('headache') ||
+    lower.includes('migraine') || lower.includes('blood pressure') || lower.includes('hypertension') ||
+    /\bbp\b/i.test(lower) || lower.includes('drug')
   ) {
     return {
       reply:
