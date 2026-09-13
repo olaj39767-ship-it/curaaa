@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-import { handleChatRequest } from './src/lib/chatEngine';
+import { handleChatRequest } from './lib/chatEngine';
 
 dotenv.config();
 

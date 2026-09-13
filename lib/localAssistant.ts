@@ -7,7 +7,7 @@
 // npm install fuse.js   (tiny, free, no API, runs in the browser)
 
 import Fuse from 'fuse.js';
-import { Medicine } from '../types';
+import { Medicine } from '../src/types';
 
 export type LocalAction =
   | 'BUY_MEDICINES'

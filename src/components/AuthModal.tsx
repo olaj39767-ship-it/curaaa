@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { X, Lock, Mail, Phone, User as UserIcon, ShieldCheck, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 import { User } from '../types';
-import { registerWithEmail, loginWithEmail, loginWithGoogle } from '../lib/dbService';
+import { registerWithEmail, loginWithEmail, loginWithGoogle } from '../../lib/dbService';
 
 interface AuthModalProps {
   isOpen: boolean;

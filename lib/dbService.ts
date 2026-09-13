@@ -22,8 +22,8 @@ import {
   User as FirebaseUser
 } from 'firebase/auth';
 import { auth, db, googleProvider } from './firebase';
-import { Medicine, Order, QuoteRequest, User } from '../types';
-import { MEDICINES } from '../data/mockData';
+import { Medicine, Order, QuoteRequest, User } from '../src/types';
+import { MEDICINES } from '../src/data/mockData';
 
 // Collection references
 const MEDICATIONS_COLLECTION = 'medications';

@@ -38,7 +38,7 @@ import {
   updateUserRole,
   LiveRequestItem,
   SUPER_ADMIN_EMAIL
-} from '../lib/dbService';
+} from '../../lib/dbService';
 import { formatNaira } from '../data/mockData';
 
 interface AdminManagementViewProps {

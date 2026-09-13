@@ -15,7 +15,7 @@ import {
 import { 
   auth, 
   db 
-} from './lib/firebase';
+} from '../lib/firebase';
 import { 
   doc, 
   getDoc, 
@@ -31,7 +31,7 @@ import {
   logoutUser, 
   SUPER_ADMIN_EMAIL,
   updateUserRole 
-} from './lib/dbService';
+} from '../lib/dbService';
 
 // Components
 import { Navbar } from './components/Navbar';
